@@ -16,6 +16,7 @@ class Reproject(object):
     def __init__(self,frame,camera_type,region,enemy,real_size,K_0,C_0,touch_api,debug=False):
         self._scene=frame.copy()#初始化的图像
         self._region=region
+        self._scene_region=None
         self._color_bbox=None
         frame_size=read_yaml(camera_type)[4]
         self._size=frame_size# 目前没有用到
@@ -28,7 +29,8 @@ class Reproject(object):
         self._scene_init=False
     def _plot_regin(self,scene):
         '''
-        计算预警区域反投影坐标，初始化了就可以了
+        计算预警区域反投影坐标，用第一帧初始化了就可以了
+        return: 预警区域反投影坐标
         '''
         inside=[]
         for r in self._region.keys():
@@ -36,23 +38,27 @@ class Reproject(object):
             type,shape_type,team,location,height_type=r.split('_')
             if location not in enemy_case or color2enemy[team]==self._enemy: #筛选出敌方的区域  
                 if type=='s' or type=='a': #筛选需要进行反投影的区域
+
                     if shape_type=='r': #绘制矩形
                         #引入左上右下两点
                         lt=self._region[r][:2].copy()
                         rd=self._region[r][2:4].copy()
                         #因原点不同，进行坐标变换
-                        lt[1]=lt[1]-self._real_size[1]
-                        rd[1]=rd[1]-self._real_size[1]
+                        lt[1]=self._real_size[1]-lt[1]
+                        rd[1]=self._real_size[1]-rd[1]
                         #另外两点坐标
                         ld=[lt[0],rd[1]]
                         rt=[rd[0],lt[1]]
+
                         cor=np.float32([lt,rt,rd,ld]).reshape(-1,2)#坐标数组
+
                         if height_type=='a': #四点在同一高度
                             height=np.ones((cor.shape[0], 1)) * self._region[r][4]
                         if height_type=='d': #四点在不同高度
                             height=np.ones((cor.shape[0], 1))
                             height[1:3] *= self._region[r][5]  # 右上和右下
                             height[[0, 3]] *= self._region[r][4]  # 左上和左下
+
                     if shape_type == 'fp':
                         # 四点凸四边形类型，原理同上
                         cor=np.float32(self._region[r][:8]).reshape(-1,2)
@@ -63,10 +69,13 @@ class Reproject(object):
                             height=np.ones((cor.shape[0],1))
                             height[1:3] *= self._region[r][9]  
                             height[[0, 3]] *= self._region[r][8] 
+
                     cor=np.concatenate([cor,height],axis=1)#合并高度坐标
+
                     recor=cv2.projectPoints(cor,self._rvec,self._tvec,self._K_0,self._C_0)[0].astype(int).reshape(-1,2)#得到反投影坐标
                     self._scene_region[r]=recor #储存反投影坐标
         self._scene_init=True
+        return self._scene_region
     def push_T(self,rvec,tvec):
         '''
         输入相机位姿（世界到相机）
@@ -93,7 +102,7 @@ class Reproject(object):
         预警预测
         armors和bbox详见network类，数据格式根据需要修改,默认使用装甲板bounding box。
         '''
-        whole_alarming=False  # 指示是否在任意区域预警
+        rp_alarming=None
         cache=None  # 当前帧缓存框
         ids=np.array([1, 2, 3, 4, 5, 8, 9, 10, 11, 12])  # id顺序
         f_max=lambda x, y: (x+y+abs(x-y))//2
@@ -136,6 +145,7 @@ class Reproject(object):
 
                             pred_cls.append(np.array(i))#预测出的装甲板类型
                             p_bbox.append(now_bbox)#预测出的bbox
+
             if len(pred_cls):
                 # 将cls和四点合并
                 pred_bbox=np.concatenate([np.stack(pred_cls,axis=0).reshape(-1,1),np.stack(p_bbox,axis=0)],axis=1)
@@ -171,12 +181,13 @@ class Reproject(object):
                 # 判断对于各个预测框，是否有点在该区域内
                 mask=np.array([[is_inside(self._scene_region[r],p) for p in cor] for cor in points])
                 mask=np.sum(mask,axis=1)>0 #True or False,只要有一个点在区域内，则为True
-                alarm_target=cls[mask]#需要预警的装甲板种类
+                alarm_target=cls[mask] #需要预警的装甲板种类
                 #判断是否为敌方
-                alarming=np.logical_or(np.logical_and(alarm_target>=1,alarm_target<=5)\
+                enemy=np.logical_or(np.logical_and(alarm_target>=1,alarm_target<=5)\
                     if self._enemy else np.logical_and(alarm_target<=12,alarm_target>=8),alarm_target<1)
-                whole_alarming=whole_alarming or alarming.any()
-                alarm_target=alarm_target[alarming] #最终目标预警
+                alarm_target=alarm_target[enemy] #在此区域中需要预警的目标
+                if len(alarm_target):
+                    rp_alarming={r:alarm_target.reshape(1,-1)}
         #储存为上一帧的框
         if isinstance(cache, np.ndarray):
             for i in ids:
@@ -184,5 +195,4 @@ class Reproject(object):
             self._cache=cache.copy()
         else:
             self._cache=None
-
-        return whole_alarming,pred_bbox#此处暂未修改
+        return rp_alarming
