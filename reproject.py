@@ -25,7 +25,6 @@ class Reproject(object):
         self._cache=None
         self._debug=debug
         self._scene_init=False
-        self._iou_cache=False
 
     def _plot_regin(self):
         '''
@@ -131,8 +130,6 @@ class Reproject(object):
 
                         if np.max(iou) > self._iou_threshold:  # 当最大iou超过阈值值才预测
                             now_bbox=cars[np.argmax(iou)].copy()  # x1,y1,x2,y2
-                            cache_pred.append(now_bbox.copy())
-                            cache_pred=cache_pred[:,1:].reshape(-1,4)
                             # TODO:可以加入Debug
 
                             # 装甲板位置估计
@@ -148,11 +145,6 @@ class Reproject(object):
             if len(pred_cls):
                 # 将cls和四点合并
                 pred_bbox=np.concatenate([np.stack(pred_cls,axis=0).reshape(-1,1),np.stack(p_bbox,axis=0)],axis=1)
-                if self._iou_cache:
-                    # 添加IoU预测框至框缓存
-                    cache_pred = np.concatenate(
-                        [np.stack(pred_cls, axis=0).reshape(-1, 1), np.stack(cache_pred, axis=0)], axis=1)
-                    cache = np.concatenate([cache, cache_pred], axis=0)
             #默认使用bounding box为points四点
             x1=armors[:,2].reshape(-1,1)
             y1=armors[:,3].reshape(-1,1)
@@ -195,4 +187,4 @@ class Reproject(object):
             self._cache=cache.copy()
         else:
             self._cache=None
-        return rp_alarming
+        return rp_alarming,pred_bbox
