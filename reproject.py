@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 from radar_class.camera import read_yaml #相机参数
-from radar_class.common import plot, armor_plot, is_inside 
+from radar_class.common import plot,is_inside 
 from radar_class.config import color2enemy, enemy_case
 
 class Reproject(object):
@@ -13,26 +13,25 @@ class Reproject(object):
     反投影预警
     '''
     _iou_threshold=0.8
-    def __init__(self,frame,camera_type,region,enemy,real_size,K_0,C_0,touch_api,debug=False):
+    def __init__(self,frame,camera_type,region,real_size,K_0,C_0,touch_api,debug=False):
         self._scene=frame.copy()#初始化的图像
         self._region=region
         self._scene_region=None
-        self._color_bbox=None
         frame_size=read_yaml(camera_type)[4]
         self._size=frame_size# 目前没有用到
         self._K_O=K_0
         self._C_O=C_0
-        self._enemy=enemy
         self._real_size=real_size
         self._cache=None
         self._debug=debug
         self._scene_init=False
-    def _plot_regin(self,scene):
+        self._iou_cache=False
+
+    def _plot_regin(self):
         '''
         计算预警区域反投影坐标，用第一帧初始化了就可以了
         return: 预警区域反投影坐标
         '''
-        inside=[]
         for r in self._region.keys():
             #格式解析
             type,shape_type,team,location,height_type=r.split('_')
@@ -84,113 +83,114 @@ class Reproject(object):
         self.rvec=rvec
         self.tvec=tvec
         #初始化预警区域字典
-        self._inside=self._plot_regin(None)
+        self._plot_regin(None)
         T=np.eye(4)
         T[:3,:3]=cv2.Rodrigues(rvec)[0]#旋转向量转化为旋转矩阵
         T[:3,3]=tvec.reshape(-1)#加上平移向量
         T=np.linalg.inv(T)#矩阵求逆
         return T,(T@(np.array([0,0,0,1])))[:3]
-    def update(self,frame,results,armors):
+    def update(self,frame):
         '''
         更新一帧
         '''
         self._every_scene = frame
-        #画预测框同时返回仅有颜色的bbox,因为绘图单独出来，所以只是用返回值
-        self._color_bbox=plot(results,self._every_scene)#color bbox(x1,y1,x2,y2)
-    def check(self,armors,bbox):
+    def check(self,armors,cars):
         '''
         预警预测
-        armors和bbox详见network类，数据格式根据需要修改,默认使用装甲板bounding box。
+        armors:N,cls+对应的车辆预测框序号+装甲板bbox
+        cars:N,cls+车辆bbox
         '''
         rp_alarming=None
+        color_bbox = []
         cache=None  # 当前帧缓存框
-        ids=np.array([1, 2, 3, 4, 5, 8, 9, 10, 11, 12])  # id顺序
+        id=np.array([1,2,3,4,5])
         f_max=lambda x, y: (x+y+abs(x-y))//2
         f_min=lambda x, y: (x+y-abs(x-y))//2
-        if isinstance(armors,np.ndarray) and isinstance(bbox,np.ndarray):
+        if isinstance(armors,np.ndarray) and isinstance(cars,np.ndarray):
             assert len(armors)
             pred_cls=[]
             p_bbox=[]  # IoU预测框（装甲板估计后的装甲板框）
             cache_pred=[]# 可能要缓存的当帧预测IoU预测框的原始框，缓存格式 id,x1,y1,x2,y2
-            cache=np.concatenate([armors[:,9].reshape(-1,1),np.stack([bbox[int(i)] for i in armors[:,10]],axis=0)],axis=1)
-            cls=armors[:,9].reshape(-1,1)
+            cache=np.concatenate([armors[:,0].reshape(-1,1),np.stack([cars[int(i)] for i in armors[:,1]],axis=0)],axis=1)
+            cls=armors[:,0].reshape(-1,1)
             #以下为IOU预测
             if isinstance(self._cache, np.ndarray):
-                for i in ids:
-                    mask=self._cache[:, 0]==i
+                for i in id:
+                    mask=self._cache[:,0]==i
                     if not (cls==i).any() and mask.any():
-                        cache_bbox=self._cache[mask][:,1:]
+                        cache_bbox=self._cache[mask][:,2:]
                         # 计算交并比
-                        cache_bbox=np.repeat(cache_bbox,len(bbox),axis=0)
-                        x1=f_max(cache_bbox[:,0],bbox[:,0])  # 交集左上角x
-                        x2=f_min(cache_bbox[:,2],bbox[:,2])  # 交集右下角x
-                        y1=f_max(cache_bbox[:,1],bbox[:,1])  # 交集左上角y
-                        y2=f_min(cache_bbox[:,3],bbox[:,3])  # 交集右下角y
+                        cache_bbox=np.repeat(cache_bbox,len(cars),axis=0)
+                        x1=f_max(cache_bbox[:,0],cars[:,1])  # 交集左上角x
+                        x2=f_min(cache_bbox[:,2],cars[:,3])  # 交集右下角x
+                        y1=f_max(cache_bbox[:,1],cars[:,2])  # 交集左上角y
+                        y2=f_min(cache_bbox[:,3],cars[:,4])  # 交集右下角y
                         overlap=f_max(np.zeros((x1.shape)),x2-x1)*f_max(np.zeros((y1.shape)),y2-y1)
                         union=(cache_bbox[:,2]-cache_bbox[:,0])*(cache_bbox[:,3]-cache_bbox[:,1])
                         iou=(overlap/union)
 
                         if np.max(iou) > self._iou_threshold:  # 当最大iou超过阈值值才预测
-                            now_bbox=bbox[np.argmax(iou)].copy()  # x1,y1,x2,y2
+                            now_bbox=cars[np.argmax(iou)].copy()  # x1,y1,x2,y2
                             cache_pred.append(now_bbox.copy())
-                            # TODO:可以加入Debug\
+                            cache_pred=cache_pred[:,1:].reshape(-1,4)
+                            # TODO:可以加入Debug
 
                             # 装甲板位置估计
-                            w,h=(now_bbox[2:]-now_bbox[:2])
-                            now_bbox[2]=w//3
-                            now_bbox[3]=h//5
-                            now_bbox[1]+=now_bbox[3]*3
-                            now_bbox[0]+=now_bbox[2]
+                            now_bbox[3]=now_bbox[3]//3
+                            now_bbox[4]=now_bbox[4]//5
+                            now_bbox[2]+=now_bbox[4]*3
+                            now_bbox[1]+=now_bbox[3]
                             # TODO：Debug绘制装甲板
 
                             pred_cls.append(np.array(i))#预测出的装甲板类型
-                            p_bbox.append(now_bbox)#预测出的bbox
+                            p_bbox.append(now_bbox[:,1:].reshape(-1,4))#预测出的bbox
 
             if len(pred_cls):
                 # 将cls和四点合并
                 pred_bbox=np.concatenate([np.stack(pred_cls,axis=0).reshape(-1,1),np.stack(p_bbox,axis=0)],axis=1)
+                if self._iou_cache:
+                    # 添加IoU预测框至框缓存
+                    cache_pred = np.concatenate(
+                        [np.stack(pred_cls, axis=0).reshape(-1, 1), np.stack(cache_pred, axis=0)], axis=1)
+                    cache = np.concatenate([cache, cache_pred], axis=0)
             #默认使用bounding box为points四点
-            x1=armors[:,11].reshape(-1,1)
-            y1=armors[:,12].reshape(-1,1)
-            x2=(armors[:,11]+armors[:,13]).reshape(-1,1)
-            y2=(armors[:,12]+armors[:,14]).reshape(-1,1)
+            x1=armors[:,2].reshape(-1,1)
+            y1=armors[:,3].reshape(-1,1)
+            x2=(armors[:,2]+armors[:,4]).reshape(-1,1)
+            y2=(armors[:,3]+armors[:,5]).reshape(-1,1)
             points=np.concatenate([x1, y1, x2, y1, x2, y2, x1, y2],axis=1)
             #对仅预测出颜色的敌方预测框进行数据整合
-            if isinstance(self._color_bbox,np.ndarray):
-                self._color_bbox=self._color_bbox[self._color_bbox[:,0]==self._enemy]
-                if len(self._color_bbox):
-                    color_cls=self._color_bbox[:,0].reshape(-1,1)-1
-                    #预估装甲板位置，见技术报告
-                    w=self._color_bbox[:,3]-self._color_bbox[:,1]
-                    h=self._color_bbox[:,4]-self._color_bbox[:,2]
-                    self._color_bbox[:,3]=w//3  
-                    self._color_bbox[:,4]=h//5
-                    self._color_bbox[:,2]+=self._color_bbox[:,4]*3
-                    self._color_bbox[:,1]+=self._color_bbox[:,3]
-                    x1=self._color_bbox[:,1]
-                    y1=self._color_bbox[:,2]
-                    x2=x1+self._color_bbox[:,3]
-                    y2=y1+self._color_bbox[:,4]
-                    color_fp=np.stack([x1,y1,x2,y1,x2,y2,x1,y2],axis=1)
-                    #与之前的数据进行整合
-                    points=np.concatenate([points,color_fp],axis=0)
-                    cls=np.concatenate([cls,color_cls],axis=0)
+            for no_color,bbox in cars[:,0]:
+                if no_color==0:
+                    color_bbox.append(np.array([no_color,*bbox]))
+            if len(color_bbox):
+                color_bbox=np.stack(color_bbox,axis=0)
+            if isinstance(color_bbox,np.ndarray):
+                #预估装甲板位置，见技术报告
+                color_cls=color_bbox[:,0].reshape(-1,1)
+                color_bbox[:,3]=color_bbox[:,3]//3  
+                color_bbox[:,4]=color_bbox[:,4]//5
+                color_bbox[:,1]+=color_bbox[:,3]
+                color_bbox[:,2]+=color_bbox[:,4]*3
+                x1=color_bbox[:,1]
+                y1=color_bbox[:,2]
+                x2=x1+color_bbox[:,3]
+                y2=y1+color_bbox[:,4]
+                color_fp=np.stack([x1,y1,x2,y1,x2,y2,x1,y2],axis=1)
+                #与之前的数据进行整合
+                points=np.concatenate([points,color_fp],axis=0)
+                cls=np.concatenate([cls,color_cls],axis=0)
             points=points.reshape((-1,4,2))
             for r in self._scene_region.keys():
-                _,_,team,loc,_=r.split('_')
                 # 判断对于各个预测框，是否有点在该区域内
                 mask=np.array([[is_inside(self._scene_region[r],p) for p in cor] for cor in points])
                 mask=np.sum(mask,axis=1)>0 #True or False,只要有一个点在区域内，则为True
                 alarm_target=cls[mask] #需要预警的装甲板种类
-                #判断是否为敌方
-                enemy=np.logical_or(np.logical_and(alarm_target>=1,alarm_target<=5)\
-                    if self._enemy else np.logical_and(alarm_target<=12,alarm_target>=8),alarm_target<1)
-                alarm_target=alarm_target[enemy] #在此区域中需要预警的目标
                 if len(alarm_target):
                     rp_alarming={r:alarm_target.reshape(1,-1)}
         #储存为上一帧的框
         if isinstance(cache, np.ndarray):
-            for i in ids:
+            for i in id:
                 assert cache[cache[:,0]==i].reshape(-1,5).shape[0]<=1
             self._cache=cache.copy()
         else:
