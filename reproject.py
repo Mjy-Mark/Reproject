@@ -82,7 +82,7 @@ class Reproject(object):
         self.rvec=rvec
         self.tvec=tvec
         #初始化预警区域字典
-        self._plot_regin(None)
+        self._plot_regin()
         T=np.eye(4)
         T[:3,:3]=cv2.Rodrigues(rvec)[0]#旋转向量转化为旋转矩阵
         T[:3,3]=tvec.reshape(-1)#加上平移向量
@@ -152,9 +152,9 @@ class Reproject(object):
             y2=(armors[:,3]+armors[:,5]).reshape(-1,1)
             points=np.concatenate([x1, y1, x2, y1, x2, y2, x1, y2],axis=1)
             #对仅预测出颜色的敌方预测框进行数据整合
-            for no_color,bbox in cars[:,0]:
-                if no_color==0:
-                    color_bbox.append(np.array([no_color,*bbox]))
+            for i in cars:
+                if i[0]==0:
+                    color_bbox.append(i)
             if len(color_bbox):
                 color_bbox=np.stack(color_bbox,axis=0)
             if isinstance(color_bbox,np.ndarray):
@@ -183,7 +183,7 @@ class Reproject(object):
         #储存为上一帧的框
         if isinstance(cache, np.ndarray):
             for i in id:
-                assert cache[cache[:,0]==i].reshape(-1,5).shape[0]<=1
+                assert cache[cache[:,0]==i].reshape(-1,6).shape[0]<=1
             self._cache=cache.copy()
         else:
             self._cache=None
